@@ -1,0 +1,14 @@
+apiVersion: networking.netbird.io/v1alpha1
+kind: NetbirdRoute
+metadata:
+  name: development-network
+  namespace: netbird-system
+spec:
+  network_id: "Route 5"
+  network: "10.0.1.0/24"
+  peerId: "csf5ce6cbc7s73b72h1g"
+  description: "Development network route"
+  enabled: true
+  masquerade: false
+  metric: 100
+  groups: ["csf5d96cbc7s73b72h20"]
