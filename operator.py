@@ -19,7 +19,7 @@ class RouteSpec:
     enabled: bool = True
     masquerade: bool = False
     metric: int = 9999
-    id: Optional[str] = None  # Added to support updates
+    id: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'RouteSpec':
@@ -36,23 +36,19 @@ class RouteSpec:
         if not network:
             raise ValueError("network is required")
         
-        # Validate network using ipaddress module
         try:
             ipaddress.ip_network(network)
         except ValueError as e:
             raise ValueError(f"Invalid network format: {network}. Error: {str(e)}")
 
-        # Validate groups field
         groups = data.get('groups')
         if not groups or not isinstance(groups, list):
             raise ValueError("groups is required and must be a list")
 
-        # Validate network_id field
         network_id = data.get('network_id')
         if not network_id:
             raise ValueError("network_id is required")
 
-        # Validate metric is within acceptable range
         metric = data.get('metric', 9999)
         if not isinstance(metric, (int, float)) or metric < 0:
             raise ValueError(f"Invalid metric value: {metric}. Must be a positive number.")
@@ -66,7 +62,7 @@ class RouteSpec:
             enabled=data.get('enabled', True),
             masquerade=data.get('masquerade', False),
             metric=metric,
-            id=data.get('id')  # This will be None for new routes
+            id=data.get('id')
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -82,7 +78,6 @@ class RouteSpec:
             "metric": self.metric,
         }
         
-        # Include id in the payload only if it exists
         if self.id:
             result["id"] = self.id
             
@@ -112,7 +107,6 @@ class NetbirdClient:
             
             response = requests.request(method, url, headers=self.headers, json=data)
             
-            # Log response details
             logging.debug(f"Response status: {response.status_code}")
             if response.content:
                 try:
@@ -120,7 +114,6 @@ class NetbirdClient:
                 except ValueError:
                     logging.debug(f"Response body (raw): {response.text}")
             
-            # Enhanced error handling
             if response.status_code == 422:
                 error_detail = "No error details available"
                 try:
@@ -147,13 +140,9 @@ class NetbirdClient:
 
     def update_route(self, route_id: str, route_spec: RouteSpec) -> Dict[str, Any]:
         """Update an existing route"""
-        # First get the existing route to get its ID
         existing_route = self.get_route(route_id)
-        logging.debug(f"Existing_route: {existing_route}")
-        
-        # Set the ID from the existing route
+        logging.debug(f"Existing route: {existing_route}")
         route_spec.id = existing_route['id']
-        
         return self._make_request("PUT", f"/routes/{route_id}", route_spec.to_dict())
 
     def delete_route(self, route_id: str) -> None:
@@ -164,9 +153,9 @@ class NetbirdClient:
         """Get route details"""
         return self._make_request("GET", f"/routes/{route_id}")
 
-def create_status_condition(status: str, reason: str, message: str) -> Dict[str, Any]:
+def create_status_condition(status: str, reason: str, message: str, route_id: Optional[str] = None) -> Dict[str, Any]:
     """Create a standardized status condition"""
-    return {
+    result = {
         'lastSync': datetime.utcnow().isoformat(),
         'conditions': [{
             'type': 'Ready',
@@ -176,23 +165,25 @@ def create_status_condition(status: str, reason: str, message: str) -> Dict[str,
             'message': message
         }]
     }
+    if route_id:
+        result['routeId'] = route_id
+    return result
 
 @kopf.on.startup()
 def configure(settings: kopf.OperatorSettings, **_):
     """Configure the operator settings"""
     settings.watching.server_timeout = 270
-    settings.posting.level = logging.DEBUG  # Set to DEBUG for more detailed logs
+    settings.posting.level = logging.DEBUG
     settings.watching.cluster_scope = True
     
-    # Configure logging
     logging.basicConfig(
         level=logging.DEBUG,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
-    logging.getLogger("urllib3").setLevel(logging.INFO)  # Reduce noise from urllib3
+    logging.getLogger("urllib3").setLevel(logging.INFO)
 
 @kopf.on.create('networking.netbird.io', 'v1alpha1', 'netbirdroutes')
-def create_fn(spec: Dict[str, Any], meta: Dict[str, Any], logger: logging.Logger, **_):
+def create_fn(spec: Dict[str, Any], meta: Dict[str, Any], logger: logging.Logger, **_) -> Dict[str, Any]:
     """Handle creation of new Netbird routes"""
     logger.info("Starting route creation")
     logger.debug(f"Received spec: {spec}")
@@ -210,14 +201,12 @@ def create_fn(spec: Dict[str, Any], meta: Dict[str, Any], logger: logging.Logger
         
         route = client.create_route(route_spec)
         
-        return {
-            'routeId': route['id'],
-            **create_status_condition(
-                status='True',
-                reason='RouteCreated',
-                message=f"Route {route['id']} created successfully"
-            )
-        }
+        return create_status_condition(
+            status='True',
+            reason='RouteCreated',
+            message=f"Route {route['id']} created successfully",
+            route_id=route['id']
+        )
     except ValueError as e:
         logger.error(f"Invalid route specification: {str(e)}")
         return create_status_condition(
@@ -234,12 +223,19 @@ def create_fn(spec: Dict[str, Any], meta: Dict[str, Any], logger: logging.Logger
         )
 
 @kopf.on.update('networking.netbird.io', 'v1alpha1', 'netbirdroutes')
-def update_fn(spec: Dict[str, Any], meta: Dict[str, Any], status: Dict[str, Any], 
+def update_fn(spec: Dict[str, Any], status: Dict[str, Any], old: Dict[str, Any], new: Dict[str, Any], 
               logger: logging.Logger, **_) -> Dict[str, Any]:
     """Handle updates to existing Netbird routes"""
     logger.info("Starting route update")
     logger.debug(f"Received spec: {spec}")
-    
+    logger.debug(f"Current status: {status}")
+    logger.debug(f"Old spec: {old.get('spec', {})}")
+    logger.debug(f"New spec: {new.get('spec', {})}")
+
+    if old.get('spec') == new.get('spec'):
+        logger.info("No changes detected in spec, skipping update")
+        return status
+
     api_key = os.environ.get('NETBIRD_API_KEY')
     if not api_key:
         raise kopf.PermanentError("NETBIRD_API_KEY environment variable is required")
@@ -247,10 +243,22 @@ def update_fn(spec: Dict[str, Any], meta: Dict[str, Any], status: Dict[str, Any]
     client = NetbirdClient(api_key)
     
     try:
-        route_id = status.get('routeId')
+        # Get route ID from create_fn status or update_fn status
+        route_id = None
+        if 'create_fn' in status and 'routeId' in status['create_fn']:
+            route_id = status['create_fn']['routeId']
+        elif 'update_fn' in status and 'routeId' in status['update_fn']:
+            route_id = status['update_fn']['routeId']
+        
         if not route_id:
-            raise kopf.PermanentError("No route ID found in status")
-            
+            error_msg = "No route ID found in status"
+            logger.error(error_msg)
+            return create_status_condition(
+                status='False',
+                reason='MissingRouteId',
+                message=error_msg
+            )
+
         route_spec = RouteSpec.from_dict(spec)
         logger.info(f"Updating route {route_id} for network {route_spec.network}")
         logger.debug(f"Prepared route specification: {route_spec.to_dict()}")
@@ -260,28 +268,31 @@ def update_fn(spec: Dict[str, Any], meta: Dict[str, Any], status: Dict[str, Any]
         return create_status_condition(
             status='True',
             reason='RouteUpdated',
-            message=f"Route {route['id']} updated successfully"
-        ) | {'routeId': route['id']}
+            message=f"Route {route['id']} updated successfully",
+            route_id=route['id']
+        )
     except ValueError as e:
-        logger.error(f"Invalid route specification: {str(e)}")
+        error_msg = f"Invalid route specification: {str(e)}"
+        logger.error(error_msg)
         return create_status_condition(
             status='False',
             reason='ValidationError',
-            message=str(e)
+            message=error_msg
         )
     except Exception as e:
-        logger.error(f"Failed to update route: {str(e)}")
+        error_msg = f"Failed to update route: {str(e)}"
+        logger.error(error_msg)
         return create_status_condition(
             status='False',
             reason='Error',
-            message=str(e)
+            message=error_msg
         )
 
 @kopf.on.delete('networking.netbird.io', 'v1alpha1', 'netbirdroutes')
-def delete_fn(spec: Dict[str, Any], meta: Dict[str, Any], status: Dict[str, Any], 
-              logger: logging.Logger, **_):
+def delete_fn(spec: Dict[str, Any], status: Dict[str, Any], logger: logging.Logger, **_):
     """Handle deletion of Netbird routes"""
     logger.info("Starting route deletion")
+    logger.debug(f"Current status: {status}")
     
     api_key = os.environ.get('NETBIRD_API_KEY')
     if not api_key:
@@ -290,7 +301,13 @@ def delete_fn(spec: Dict[str, Any], meta: Dict[str, Any], status: Dict[str, Any]
     client = NetbirdClient(api_key)
     
     try:
-        route_id = status.get('routeId')
+        # Get route ID from create_fn status or update_fn status
+        route_id = None
+        if 'create_fn' in status and 'routeId' in status['create_fn']:
+            route_id = status['create_fn']['routeId']
+        elif 'update_fn' in status and 'routeId' in status['update_fn']:
+            route_id = status['update_fn']['routeId']
+
         if not route_id:
             logger.warning("No route ID found in status, skipping deletion")
             return
