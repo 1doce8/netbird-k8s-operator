@@ -182,7 +182,7 @@ def configure(settings: kopf.OperatorSettings, **_):
     )
     logging.getLogger("urllib3").setLevel(logging.INFO)
 
-@kopf.on.create('networking.netbird.io', 'v1alpha1', 'netbirdroutes')
+@kopf.on.create('gitops.netbird.io', 'v1alpha1', 'networkroutes')
 def create_fn(spec: Dict[str, Any], meta: Dict[str, Any], logger: logging.Logger, **_) -> Dict[str, Any]:
     """Handle creation of new Netbird routes"""
     logger.info("Starting route creation")
@@ -222,7 +222,7 @@ def create_fn(spec: Dict[str, Any], meta: Dict[str, Any], logger: logging.Logger
             message=str(e)
         )
 
-@kopf.on.update('networking.netbird.io', 'v1alpha1', 'netbirdroutes')
+@kopf.on.update('gitops.netbird.io', 'v1alpha1', 'networkroutes')
 def update_fn(spec: Dict[str, Any], status: Dict[str, Any], old: Dict[str, Any], new: Dict[str, Any], 
               logger: logging.Logger, **_) -> Dict[str, Any]:
     """Handle updates to existing Netbird routes"""
@@ -288,7 +288,7 @@ def update_fn(spec: Dict[str, Any], status: Dict[str, Any], old: Dict[str, Any],
             message=error_msg
         )
 
-@kopf.on.delete('networking.netbird.io', 'v1alpha1', 'netbirdroutes')
+@kopf.on.delete('gitops.netbird.io', 'v1alpha1', 'networkroutes')
 def delete_fn(spec: Dict[str, Any], status: Dict[str, Any], logger: logging.Logger, **_):
     """Handle deletion of Netbird routes"""
     logger.info("Starting route deletion")

@@ -2,16 +2,16 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: netbirdroutes.networking.netbird.io
+  name: networkroutes.gitops.netbird.io
 spec:
-  group: networking.netbird.io
+  group: gitops.netbird.io
   names:
-    kind: NetbirdRoute
-    plural: netbirdroutes
-    singular: netbirdroute
+    kind: NetworkRoute
+    plural: networkroutes
+    singular: networkroute
     shortNames:
       - nbr
-  scope: Cluster
+  scope: Namespaced  # Changed from Cluster to Namespaced for better isolation
   versions:
     - name: v1alpha1
       served: true
@@ -20,12 +20,17 @@ spec:
         - name: Status
           type: string
           jsonPath: .status.conditions[?(@.type=="Ready")].status
+        - name: Reason
+          type: string
+          jsonPath: .status.conditions[?(@.type=="Ready")].reason
         - name: Age
           type: date
           jsonPath: .metadata.creationTimestamp
       schema:
         openAPIV3Schema:
           type: object
+          required:
+            - spec
           properties:
             spec:
               type: object
@@ -37,42 +42,58 @@ spec:
               properties:
                 network:
                   type: string
+                  description: "Network CIDR"
                 peerId:
                   type: string
+                  description: "Netbird Peer ID"
                 groups:
                   type: array
+                  description: "List of group IDs"
                   items:
                     type: string
                 network_id:
                   type: string
+                  description: "Network identifier"
                 description:
                   type: string
+                  description: "Route description"
                 enabled:
                   type: boolean
+                  description: "Route enabled status"
+                  default: true
                 masquerade:
                   type: boolean
+                  description: "Masquerade status"
+                  default: false
                 metric:
                   type: integer
+                  description: "Route metric"
+                  default: 9999
             status:
               type: object
               properties:
-                create_fn:  # Add this to match kopf's status structure
-                  type: object
-                  x-kubernetes-preserve-unknown-fields: true
-                update_fn:  # Add this to match kopf's status structure
-                  type: object
-                  x-kubernetes-preserve-unknown-fields: true
-                delete_fn:  # Add this to match kopf's status structure
-                  type: object
-                  x-kubernetes-preserve-unknown-fields: true
                 routeId:
                   type: string
+                  description: "Netbird route ID"
                 lastSync:
                   type: string
+                  description: "Last synchronization timestamp"
+                create_fn:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                update_fn:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                delete_fn:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
                 conditions:
                   type: array
                   items:
                     type: object
+                    required:
+                      - type
+                      - status
                     properties:
                       type:
                         type: string

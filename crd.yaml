@@ -1,5 +1,5 @@
-apiVersion: networking.netbird.io/v1alpha1
-kind: NetbirdRoute
+apiVersion: gitops.netbird.io/v1alpha1
+kind: NetworkRoute
 metadata:
   name: development-network
   namespace: netbird-system
