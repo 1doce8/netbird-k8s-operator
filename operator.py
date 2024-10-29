@@ -225,18 +225,24 @@ class NetbirdClient:
 
 def create_status_condition(status: str, reason: str, message: str, resource_id: Optional[str] = None) -> Dict[str, Any]:
     """Create a standardized status condition"""
+    condition = {
+        'type': 'Ready',
+        'status': status,
+        'lastTransitionTime': datetime.utcnow().isoformat(),
+        'reason': reason,
+        'message': message
+    }
+    
     result = {
         'lastSync': datetime.utcnow().isoformat(),
-        'conditions': [{
-            'type': 'Ready',
-            'status': status,
-            'lastTransitionTime': datetime.utcnow().isoformat(),
-            'reason': reason,
-            'message': message
-        }]
+        'conditions': [condition],
+        'status': status,  # Add status field for printer column
+        'reason': reason   # Add reason field for printer column
     }
+    
     if resource_id:
         result['resourceID'] = resource_id
+    
     return result
 
 @kopf.on.startup()
@@ -260,7 +266,12 @@ def create_fn(spec: Dict[str, Any], meta: Dict[str, Any], logger: logging.Logger
     
     api_key = os.environ.get('NETBIRD_API_KEY')
     if not api_key:
-        raise kopf.PermanentError("NETBIRD_API_KEY environment variable is required")
+        status = create_status_condition(
+            status='False',
+            reason='ConfigError',
+            message="NETBIRD_API_KEY environment variable is required"
+        )
+        raise kopf.PermanentError("NETBIRD_API_KEY environment variable is required", status=status)
 
     client = NetbirdClient(api_key)
     
@@ -278,19 +289,20 @@ def create_fn(spec: Dict[str, Any], meta: Dict[str, Any], logger: logging.Logger
             resource_id=route['id']
         )
     except ValueError as e:
-        logger.error(f"Invalid route specification: {str(e)}")
-        return create_status_condition(
+        status = create_status_condition(
             status='False',
             reason='ValidationError',
             message=str(e)
         )
+        raise kopf.PermanentError(str(e), status=status)
     except Exception as e:
-        logger.error(f"Failed to create route: {str(e)}")
-        return create_status_condition(
+        status = create_status_condition(
             status='False',
             reason='Error',
             message=str(e)
         )
+        raise kopf.TemporaryError(str(e), delay=60, status=status)
+
 
 @kopf.on.update('gitops.netbird.io', 'v1alpha1', 'networkroutes')
 def update_fn(spec: Dict[str, Any], status: Dict[str, Any], old: Dict[str, Any], new: Dict[str, Any], 
@@ -308,7 +320,12 @@ def update_fn(spec: Dict[str, Any], status: Dict[str, Any], old: Dict[str, Any],
 
     api_key = os.environ.get('NETBIRD_API_KEY')
     if not api_key:
-        raise kopf.PermanentError("NETBIRD_API_KEY environment variable is required")
+        status = create_status_condition(
+            status='False',
+            reason='ConfigError',
+            message="NETBIRD_API_KEY environment variable is required"
+        )
+        raise kopf.PermanentError("NETBIRD_API_KEY environment variable is required", status=status)
 
     client = NetbirdClient(api_key)
     
@@ -321,13 +338,12 @@ def update_fn(spec: Dict[str, Any], status: Dict[str, Any], old: Dict[str, Any],
             route_id = status['update_fn']['resourceID']
         
         if not route_id:
-            error_msg = "No route ID found in status"
-            logger.error(error_msg)
-            return create_status_condition(
+            status = create_status_condition(
                 status='False',
                 reason='MissingResourceID',
-                message=error_msg
+                message="No route ID found in status"
             )
+            raise kopf.PermanentError("No route ID found in status", status=status)
 
         route_spec = RouteSpec.from_dict(spec)
         logger.info(f"Updating route {route_id} for network {route_spec.network}")
@@ -339,24 +355,22 @@ def update_fn(spec: Dict[str, Any], status: Dict[str, Any], old: Dict[str, Any],
             status='True',
             reason='RouteUpdated',
             message=f"Route {route['id']} updated successfully",
-            route_id=route['id']
+            resource_id=route['id']  # Changed from route_id to resource_id
         )
     except ValueError as e:
-        error_msg = f"Invalid route specification: {str(e)}"
-        logger.error(error_msg)
-        return create_status_condition(
+        status = create_status_condition(
             status='False',
             reason='ValidationError',
-            message=error_msg
+            message=str(e)
         )
+        raise kopf.PermanentError(str(e), status=status)
     except Exception as e:
-        error_msg = f"Failed to update route: {str(e)}"
-        logger.error(error_msg)
-        return create_status_condition(
+        status = create_status_condition(
             status='False',
             reason='Error',
-            message=error_msg
+            message=str(e)
         )
+        raise kopf.TemporaryError(str(e), delay=60, status=status)
 
 @kopf.on.delete('gitops.netbird.io', 'v1alpha1', 'networkroutes')
 def delete_fn(spec: Dict[str, Any], status: Dict[str, Any], logger: logging.Logger, **_):

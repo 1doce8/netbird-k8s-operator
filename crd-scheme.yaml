@@ -19,10 +19,10 @@ spec:
       additionalPrinterColumns:
         - name: Status
           type: string
-          jsonPath: .status.conditions[?(@.type=="Ready")].status
+          jsonPath: .status.conditions[?(@.type=="Status")].reason
         - name: Reason
           type: string
-          jsonPath: .status.conditions[?(@.type=="Ready")].reason
+          jsonPath: .status.conditions[?(@.type=="Reason")].reason
         - name: Age
           type: date
           jsonPath: .metadata.creationTimestamp
