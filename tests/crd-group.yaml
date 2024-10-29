@@ -4,5 +4,5 @@ metadata:
   name: test-group
   namespace: netbird-system
 spec:
-  name: "Test"
-  description: "Test"
+  name: "Test-Group"
+  description: "Test Group"

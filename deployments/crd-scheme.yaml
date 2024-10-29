@@ -116,7 +116,6 @@ spec:
   group: gitops.netbird.io
   names:
     kind: Groups
-    # listKind: NetbirdGroupList
     plural: groups
     singular: group
   scope: Namespaced
