@@ -9,6 +9,52 @@ import kopf
 import ipaddress
 
 @dataclass
+class GroupSpec:
+    """Data class to validate and hold group specifications"""
+    name: str
+    description: str = ""
+    peers: Optional[List[str]] = None  # Made peers optional
+    id: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'GroupSpec':
+        """Create GroupSpec from dictionary, ensuring required fields exist"""
+        logging.debug(f"Creating GroupSpec from data: {data}")
+        
+        # Validate name field
+        name = data.get('name')
+        if not name:
+            raise ValueError("name is required")
+
+        # Make peers optional
+        peers = data.get('peers', None)
+        if peers is not None and not isinstance(peers, list):
+            raise ValueError("if peers is provided, it must be a list")
+
+        return cls(
+            name=name,
+            peers=peers,
+            description=data.get('description', ''),
+            id=data.get('id')
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert GroupSpec to dictionary for API requests"""
+        result = {
+            "name": self.name,
+            "description": self.description,
+        }
+        
+        # Only include peers if it's provided
+        if self.peers is not None:
+            result["peers"] = self.peers
+            
+        if self.id:
+            result["id"] = self.id
+            
+        return result
+
+@dataclass
 class RouteSpec:
     """Data class to validate and hold route specifications"""
     network: str
@@ -153,7 +199,31 @@ class NetbirdClient:
         """Get route details"""
         return self._make_request("GET", f"/routes/{route_id}")
 
-def create_status_condition(status: str, reason: str, message: str, route_id: Optional[str] = None) -> Dict[str, Any]:
+    # Group methods
+    def create_group(self, group_spec: GroupSpec) -> Dict[str, Any]:
+        """Create a new group"""
+        return self._make_request("POST", "/groups", group_spec.to_dict())
+
+    # def update_group(self, group_id: str, group_spec: GroupSpec) -> Dict[str, Any]:
+    #     """Update an existing group"""
+    #     existing_group = self.get_group(group_id)
+    #     logging.debug(f"Existing group: {existing_group}")
+    #     group_spec.id = existing_group['id']
+    #     return self._make_request("PUT", f"/groups/{group_id}", group_spec.to_dict())
+
+    def delete_group(self, group_id: str) -> None:
+        """Delete a group"""
+        self._make_request("DELETE", f"/groups/{group_id}")
+
+    # def get_group(self, group_id: str) -> Dict[str, Any]:
+    #     """Get group details"""
+    #     return self._make_request("GET", f"/groups/{group_id}")
+
+    # def list_groups(self) -> List[Dict[str, Any]]:
+    #     """List all groups"""
+    #     return self._make_request("GET", "/groups")
+
+def create_status_condition(status: str, reason: str, message: str, resource_id: Optional[str] = None) -> Dict[str, Any]:
     """Create a standardized status condition"""
     result = {
         'lastSync': datetime.utcnow().isoformat(),
@@ -165,8 +235,8 @@ def create_status_condition(status: str, reason: str, message: str, route_id: Op
             'message': message
         }]
     }
-    if route_id:
-        result['routeId'] = route_id
+    if resource_id:
+        result['resourceID'] = resource_id
     return result
 
 @kopf.on.startup()
@@ -205,7 +275,7 @@ def create_fn(spec: Dict[str, Any], meta: Dict[str, Any], logger: logging.Logger
             status='True',
             reason='RouteCreated',
             message=f"Route {route['id']} created successfully",
-            route_id=route['id']
+            resource_id=route['id']
         )
     except ValueError as e:
         logger.error(f"Invalid route specification: {str(e)}")
@@ -245,17 +315,17 @@ def update_fn(spec: Dict[str, Any], status: Dict[str, Any], old: Dict[str, Any],
     try:
         # Get route ID from create_fn status or update_fn status
         route_id = None
-        if 'create_fn' in status and 'routeId' in status['create_fn']:
-            route_id = status['create_fn']['routeId']
-        elif 'update_fn' in status and 'routeId' in status['update_fn']:
-            route_id = status['update_fn']['routeId']
+        if 'create_fn' in status and 'resourceID' in status['create_fn']:
+            route_id = status['create_fn']['resourceID']
+        elif 'update_fn' in status and 'resourceID' in status['update_fn']:
+            route_id = status['update_fn']['resourceID']
         
         if not route_id:
             error_msg = "No route ID found in status"
             logger.error(error_msg)
             return create_status_condition(
                 status='False',
-                reason='MissingRouteId',
+                reason='MissingResourceID',
                 message=error_msg
             )
 
@@ -303,10 +373,10 @@ def delete_fn(spec: Dict[str, Any], status: Dict[str, Any], logger: logging.Logg
     try:
         # Get route ID from create_fn status or update_fn status
         route_id = None
-        if 'create_fn' in status and 'routeId' in status['create_fn']:
-            route_id = status['create_fn']['routeId']
-        elif 'update_fn' in status and 'routeId' in status['update_fn']:
-            route_id = status['update_fn']['routeId']
+        if 'create_fn' in status and 'resourceID' in status['create_fn']:
+            route_id = status['create_fn']['resourceID']
+        elif 'update_fn' in status and 'resourceID' in status['update_fn']:
+            route_id = status['update_fn']['resourceID']
 
         if not route_id:
             logger.warning("No route ID found in status, skipping deletion")
@@ -317,5 +387,74 @@ def delete_fn(spec: Dict[str, Any], status: Dict[str, Any], logger: logging.Logg
         logger.info(f"Route {route_id} deleted successfully")
     except Exception as e:
         error_msg = f"Failed to delete route: {str(e)}"
+        logger.error(error_msg)
+        raise kopf.PermanentError(error_msg)
+
+# Group Handlers
+@kopf.on.create('gitops.netbird.io', 'v1alpha1', 'groups')
+def create_group_fn(spec: Dict[str, Any], meta: Dict[str, Any], logger: logging.Logger, **_) -> Dict[str, Any]:
+    """Handle creation of new Netbird groups"""
+    logger.info(f"Starting group creation for {meta['name']}")
+    
+    api_key = os.environ.get('NETBIRD_API_KEY')
+    if not api_key:
+        raise kopf.PermanentError("NETBIRD_API_KEY environment variable is required")
+
+    client = NetbirdClient(api_key)
+    
+    try:
+        group_spec = GroupSpec.from_dict(spec)
+        logger.info(f"Creating group {group_spec.name}")
+        logger.debug(f"Prepared group specification: {group_spec.to_dict()}")
+        
+        group = client.create_group(group_spec)
+        
+        return create_status_condition(
+            status='True',
+            reason='GroupCreated',
+            message=f"Group {group['id']} created successfully",
+            resource_id=group['id']
+        )
+    except ValueError as e:
+        logger.error(f"Invalid group specification: {str(e)}")
+        raise kopf.PermanentError(f"Invalid group specification: {str(e)}")
+    except Exception as e:
+        logger.error(f"Failed to create group: {str(e)}")
+        raise kopf.TemporaryError(f"Failed to create group: {str(e)}", delay=60)
+
+@kopf.on.delete('gitops.netbird.io', 'v1alpha1', 'groups')
+def delete_group_fn(spec: Dict[str, Any], status: Dict[str, Any], meta: Dict[str, Any], 
+                   logger: logging.Logger, **_):
+    """Handle deletion of Netbird groups"""
+    logger.info(f"Starting group deletion for {meta['name']}")
+    
+    api_key = os.environ.get('NETBIRD_API_KEY')
+    if not api_key:
+        raise kopf.PermanentError("NETBIRD_API_KEY environment variable is required")
+
+    client = NetbirdClient(api_key)
+    
+    try:
+        group_id = None
+        for handler in ['create_group_fn', 'update_group_fn']:
+            if handler in status and 'resourceID' in status[handler]:
+                group_id = status[handler]['resourceID']
+                break
+
+        if not group_id:
+            logger.warning(f"No group ID found in status for {meta['name']}, skipping deletion")
+            return
+
+        logger.info(f"Deleting group {group_id}")
+        try:
+            client.delete_group(group_id)
+            logger.info(f"Group {group_id} deleted successfully")
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 404:
+                logger.info(f"Group {group_id} already deleted")
+            else:
+                raise
+    except Exception as e:
+        error_msg = f"Failed to delete group: {str(e)}"
         logger.error(error_msg)
         raise kopf.PermanentError(error_msg)
