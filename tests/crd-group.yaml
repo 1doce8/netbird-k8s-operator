@@ -1,5 +1,5 @@
 apiVersion: gitops.netbird.io/v1alpha1
-kind: Groups
+kind: Group
 metadata:
   name: test-group
   namespace: netbird-system

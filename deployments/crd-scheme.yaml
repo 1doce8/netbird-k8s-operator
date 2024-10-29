@@ -1,4 +1,3 @@
----
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
@@ -7,30 +6,27 @@ spec:
   group: gitops.netbird.io
   names:
     kind: NetworkRoute
+    listKind: NetworkRouteList
     plural: networkroutes
     singular: networkroute
-    shortNames:
-      - nbr
-  scope: Namespaced  # Changed from Cluster to Namespaced for better isolation
+  scope: Namespaced
   versions:
     - name: v1alpha1
       served: true
       storage: true
       additionalPrinterColumns:
-        - name: Status
+        - jsonPath: .status.status
+          name: Ready
           type: string
-          jsonPath: .status.conditions[?(@.type=="Status")].reason
-        - name: Reason
+        - jsonPath: .status.resourceId
+          name: RouteID
           type: string
-          jsonPath: .status.conditions[?(@.type=="Reason")].reason
-        - name: Age
+        - jsonPath: .metadata.creationTimestamp
+          name: Age
           type: date
-          jsonPath: .metadata.creationTimestamp
       schema:
         openAPIV3Schema:
           type: object
-          required:
-            - spec
           properties:
             spec:
               type: object
@@ -42,51 +38,42 @@ spec:
               properties:
                 network:
                   type: string
-                  description: "Network CIDR"
+                  pattern: '^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$'
                 peerId:
                   type: string
-                  description: "Netbird Peer ID"
                 groups:
                   type: array
-                  description: "List of group IDs"
                   items:
                     type: string
                 network_id:
                   type: string
-                  description: "Network identifier"
                 description:
                   type: string
-                  description: "Route description"
                 enabled:
                   type: boolean
-                  description: "Route enabled status"
                   default: true
                 masquerade:
                   type: boolean
-                  description: "Masquerade status"
                   default: false
                 metric:
                   type: integer
-                  description: "Route metric"
+                  minimum: 0
                   default: 9999
             status:
               type: object
               properties:
-                resourceID:
-                  type: string
-                  description: "Netbird route ID"
+                observedGeneration:
+                  type: integer
                 lastSync:
                   type: string
-                  description: "Last synchronization timestamp"
-                create_fn:
-                  type: object
-                  x-kubernetes-preserve-unknown-fields: true
-                update_fn:
-                  type: object
-                  x-kubernetes-preserve-unknown-fields: true
-                delete_fn:
-                  type: object
-                  x-kubernetes-preserve-unknown-fields: true
+                  format: date-time
+                resourceId:
+                  type: string
+                status:
+                  type: string
+                  enum: ['True', 'False', 'Unknown']
+                reason:
+                  type: string
                 conditions:
                   type: array
                   items:
@@ -94,13 +81,18 @@ spec:
                     required:
                       - type
                       - status
+                      - lastTransitionTime
+                      - reason
+                      - message
                     properties:
                       type:
                         type: string
                       status:
                         type: string
+                        enum: ['True', 'False', 'Unknown']
                       lastTransitionTime:
                         type: string
+                        format: date-time
                       reason:
                         type: string
                       message:
@@ -115,7 +107,8 @@ metadata:
 spec:
   group: gitops.netbird.io
   names:
-    kind: Groups
+    kind: Group
+    listKind: GroupList
     plural: groups
     singular: group
   scope: Namespaced
@@ -123,39 +116,48 @@ spec:
     - name: v1alpha1
       served: true
       storage: true
+      additionalPrinterColumns:
+        - jsonPath: .status.status
+          name: Ready
+          type: string
+        - jsonPath: .status.resourceId
+          name: GroupID
+          type: string
+        - jsonPath: .metadata.creationTimestamp
+          name: Age
+          type: date
       schema:
         openAPIV3Schema:
           type: object
-          required: ["spec"]
           properties:
             spec:
               type: object
-              required: ["name"]
+              required:
+                - name
               properties:
                 name:
                   type: string
-                  description: "Name of the group"
                 description:
                   type: string
-                  description: "Description of the group"
+                peers:
+                  type: array
+                  items:
+                    type: string
             status:
               type: object
               properties:
-                resourceID:
-                  type: string
-                  description: "Netbird group ID"
+                observedGeneration:
+                  type: integer
                 lastSync:
                   type: string
-                  description: "Last synchronization timestamp"
-                create_group_fn:
-                  type: object
-                  x-kubernetes-preserve-unknown-fields: true
-                # update_fn:
-                #   type: object
-                #   x-kubernetes-preserve-unknown-fields: true
-                delete_group_fn:
-                  type: object
-                  x-kubernetes-preserve-unknown-fields: true
+                  format: date-time
+                resourceId:
+                  type: string
+                status:
+                  type: string
+                  enum: ['True', 'False', 'Unknown']
+                reason:
+                  type: string
                 conditions:
                   type: array
                   items:
@@ -163,26 +165,21 @@ spec:
                     required:
                       - type
                       - status
+                      - lastTransitionTime
+                      - reason
+                      - message
                     properties:
                       type:
                         type: string
                       status:
                         type: string
+                        enum: ['True', 'False', 'Unknown']
                       lastTransitionTime:
                         type: string
+                        format: date-time
                       reason:
                         type: string
                       message:
                         type: string
-      additionalPrinterColumns:
-        - name: Status
-          type: string
-          jsonPath: .status.conditions[?(@.type=="Ready")].status
-        - name: Group ID
-          type: string
-          jsonPath: .status.resourceID
-        - name: Age
-          type: date
-          jsonPath: .metadata.creationTimestamp
       subresources:
         status: {}

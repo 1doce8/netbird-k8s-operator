@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass
 import logging
 import os
@@ -7,6 +7,7 @@ from datetime import datetime
 import requests
 import kopf
 import ipaddress
+import pytz
 
 @dataclass
 class GroupSpec:
@@ -223,9 +224,44 @@ class NetbirdClient:
     #     """List all groups"""
     #     return self._make_request("GET", "/groups")
 
-def create_status_condition(status: str, reason: str, message: str, resource_id: Optional[str] = None) -> Dict[str, Any]:
-    """Create a standardized status condition"""
-    condition = {
+def format_datetime(dt: datetime) -> str:
+    """Format datetime in RFC3339 format with timezone"""
+    if dt.tzinfo is None:
+        dt = pytz.UTC.localize(dt)
+    return dt.isoformat().replace('+00:00', 'Z')
+
+def create_status_body(status: str, reason: str, message: str, resource_id: Optional[str] = None,
+                      meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Create a standardized status body with properly formatted timestamps"""
+    current_time = datetime.utcnow()
+    
+    new_condition = {
+        'type': 'Ready',
+        'status': status,
+        'lastTransitionTime': format_datetime(current_time),
+        'reason': reason,
+        'message': message
+    }
+    
+    result = {
+        'conditions': [new_condition],
+        'lastSync': format_datetime(current_time),
+        'status': status,
+        'reason': reason
+    }
+    
+    if resource_id:
+        result['resourceId'] = resource_id
+        
+    if meta:
+        result['observedGeneration'] = meta.get('generation', 0)
+    
+    return result
+
+def create_status_condition(status: str, reason: str, message: str, resource_id: Optional[str] = None,
+                          meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Create a standardized status condition for Kopf status field"""
+    new_condition = {
         'type': 'Ready',
         'status': status,
         'lastTransitionTime': datetime.utcnow().isoformat(),
@@ -234,16 +270,52 @@ def create_status_condition(status: str, reason: str, message: str, resource_id:
     }
     
     result = {
+        'conditions': [new_condition],
         'lastSync': datetime.utcnow().isoformat(),
-        'conditions': [condition],
-        'status': status,  # Add status field for printer column
-        'reason': reason   # Add reason field for printer column
+        'status': status,
+        'reason': reason
     }
     
     if resource_id:
-        result['resourceID'] = resource_id
+        result['resourceId'] = resource_id
+        
+    if meta:
+        result['observedGeneration'] = meta.get('generation', 0)
     
-    return result
+    return {'status': result}  # Wrap in status field for kopf
+
+def update_status_conditions(current_status: Dict[str, Any], new_condition: Dict[str, Any]) -> Dict[str, Any]:
+    """Update status conditions list, maintaining history and avoiding duplicates"""
+    if not current_status:
+        current_status = {'conditions': []}
+    
+    conditions = current_status.get('conditions', [])
+    
+    # Check if we have a condition of the same type
+    existing_condition = None
+    for condition in conditions:
+        if condition['type'] == new_condition['type']:
+            existing_condition = condition
+            break
+    
+    # Only append if status or reason changed
+    should_append = True
+    if existing_condition:
+        if (existing_condition['status'] == new_condition['status'] and 
+            existing_condition['reason'] == new_condition['reason']):
+            should_append = False
+    
+    if should_append:
+        conditions.append(new_condition)
+        # Keep only last 10 conditions
+        conditions = conditions[-10:]
+    
+    current_status['conditions'] = conditions
+    # Update top-level status fields for printer columns
+    current_status['status'] = new_condition['status']
+    current_status['reason'] = new_condition['reason']
+    
+    return current_status
 
 @kopf.on.startup()
 def configure(settings: kopf.OperatorSettings, **_):
@@ -259,139 +331,124 @@ def configure(settings: kopf.OperatorSettings, **_):
     logging.getLogger("urllib3").setLevel(logging.INFO)
 
 @kopf.on.create('gitops.netbird.io', 'v1alpha1', 'networkroutes')
-def create_fn(spec: Dict[str, Any], meta: Dict[str, Any], logger: logging.Logger, **_) -> Dict[str, Any]:
+def create_fn(spec: Dict[str, Any], meta: Dict[str, Any], status: Dict[str, Any],
+              patch: Dict[str, Any], logger: logging.Logger, **kwargs):
     """Handle creation of new Netbird routes"""
     logger.info("Starting route creation")
-    logger.debug(f"Received spec: {spec}")
-    
-    api_key = os.environ.get('NETBIRD_API_KEY')
-    if not api_key:
-        status = create_status_condition(
-            status='False',
-            reason='ConfigError',
-            message="NETBIRD_API_KEY environment variable is required"
-        )
-        raise kopf.PermanentError("NETBIRD_API_KEY environment variable is required", status=status)
-
-    client = NetbirdClient(api_key)
     
     try:
+        api_key = os.environ.get('NETBIRD_API_KEY')
+        if not api_key:
+            raise kopf.PermanentError("NETBIRD_API_KEY environment variable is required")
+
+        client = NetbirdClient(api_key)
         route_spec = RouteSpec.from_dict(spec)
-        logger.info(f"Creating route for network {route_spec.network}")
-        logger.debug(f"Prepared route specification: {route_spec.to_dict()}")
-        
         route = client.create_route(route_spec)
         
-        return create_status_condition(
-            status='True',
-            reason='RouteCreated',
-            message=f"Route {route['id']} created successfully",
-            resource_id=route['id']
-        )
+        # Update status with properly formatted timestamps
+        patch.update({
+            'status': create_status_body(
+                status='True',
+                reason='RouteCreated',
+                message=f"Route {route['id']} created successfully",
+                resource_id=route['id'],
+                meta=meta
+            )
+        })
+        
     except ValueError as e:
-        status = create_status_condition(
-            status='False',
-            reason='ValidationError',
-            message=str(e)
-        )
-        raise kopf.PermanentError(str(e), status=status)
+        patch.update({
+            'status': create_status_body(
+                status='False',
+                reason='ValidationError',
+                message=str(e),
+                meta=meta
+            )
+        })
+        raise kopf.PermanentError(str(e))
+        
     except Exception as e:
-        status = create_status_condition(
-            status='False',
-            reason='Error',
-            message=str(e)
-        )
-        raise kopf.TemporaryError(str(e), delay=60, status=status)
-
+        patch.update({
+            'status': create_status_body(
+                status='False',
+                reason='Error',
+                message=str(e),
+                meta=meta
+            )
+        })
+        raise kopf.TemporaryError(str(e), delay=60)
 
 @kopf.on.update('gitops.netbird.io', 'v1alpha1', 'networkroutes')
-def update_fn(spec: Dict[str, Any], status: Dict[str, Any], old: Dict[str, Any], new: Dict[str, Any], 
-              logger: logging.Logger, **_) -> Dict[str, Any]:
+def update_fn(spec: Dict[str, Any], status: Dict[str, Any], meta: Dict[str, Any],
+              old: Dict[str, Any], new: Dict[str, Any], patch: Dict[str, Any], 
+              logger: logging.Logger, **kwargs):
     """Handle updates to existing Netbird routes"""
     logger.info("Starting route update")
-    logger.debug(f"Received spec: {spec}")
-    logger.debug(f"Current status: {status}")
-    logger.debug(f"Old spec: {old.get('spec', {})}")
-    logger.debug(f"New spec: {new.get('spec', {})}")
-
+    
     if old.get('spec') == new.get('spec'):
         logger.info("No changes detected in spec, skipping update")
-        return status
+        return
 
-    api_key = os.environ.get('NETBIRD_API_KEY')
-    if not api_key:
-        status = create_status_condition(
-            status='False',
-            reason='ConfigError',
-            message="NETBIRD_API_KEY environment variable is required"
-        )
-        raise kopf.PermanentError("NETBIRD_API_KEY environment variable is required", status=status)
-
-    client = NetbirdClient(api_key)
-    
     try:
-        # Get route ID from create_fn status or update_fn status
-        route_id = None
-        if 'create_fn' in status and 'resourceID' in status['create_fn']:
-            route_id = status['create_fn']['resourceID']
-        elif 'update_fn' in status and 'resourceID' in status['update_fn']:
-            route_id = status['update_fn']['resourceID']
+        api_key = os.environ.get('NETBIRD_API_KEY')
+        if not api_key:
+            raise kopf.PermanentError("NETBIRD_API_KEY environment variable is required")
+
+        client = NetbirdClient(api_key)
         
+        route_id = status.get('resourceId')
         if not route_id:
-            status = create_status_condition(
-                status='False',
-                reason='MissingResourceID',
-                message="No route ID found in status"
-            )
-            raise kopf.PermanentError("No route ID found in status", status=status)
+            raise kopf.PermanentError("No route ID found in status")
 
         route_spec = RouteSpec.from_dict(spec)
-        logger.info(f"Updating route {route_id} for network {route_spec.network}")
-        logger.debug(f"Prepared route specification: {route_spec.to_dict()}")
-        
         route = client.update_route(route_id, route_spec)
         
-        return create_status_condition(
-            status='True',
-            reason='RouteUpdated',
-            message=f"Route {route['id']} updated successfully",
-            resource_id=route['id']  # Changed from route_id to resource_id
-        )
+        patch.update({
+            'status': create_status_body(
+                status='True',
+                reason='RouteUpdated',
+                message=f"Route {route['id']} updated successfully",
+                resource_id=route['id'],
+                meta=meta
+            )
+        })
+        
     except ValueError as e:
-        status = create_status_condition(
-            status='False',
-            reason='ValidationError',
-            message=str(e)
-        )
-        raise kopf.PermanentError(str(e), status=status)
+        patch.update({
+            'status': create_status_body(
+                status='False',
+                reason='ValidationError',
+                message=str(e),
+                meta=meta
+            )
+        })
+        raise kopf.PermanentError(str(e))
+        
     except Exception as e:
-        status = create_status_condition(
-            status='False',
-            reason='Error',
-            message=str(e)
-        )
-        raise kopf.TemporaryError(str(e), delay=60, status=status)
+        patch.update({
+            'status': create_status_body(
+                status='False',
+                reason='Error',
+                message=str(e),
+                meta=meta
+            )
+        })
+        raise kopf.TemporaryError(str(e), delay=60)
 
 @kopf.on.delete('gitops.netbird.io', 'v1alpha1', 'networkroutes')
-def delete_fn(spec: Dict[str, Any], status: Dict[str, Any], logger: logging.Logger, **_):
+def delete_fn(spec: Dict[str, Any], status: Dict[str, Any], patch: Dict[str, Any],
+              logger: logging.Logger, **kwargs):
     """Handle deletion of Netbird routes"""
     logger.info("Starting route deletion")
-    logger.debug(f"Current status: {status}")
-    
-    api_key = os.environ.get('NETBIRD_API_KEY')
-    if not api_key:
-        raise kopf.PermanentError("NETBIRD_API_KEY environment variable is required")
-
-    client = NetbirdClient(api_key)
     
     try:
-        # Get route ID from create_fn status or update_fn status
-        route_id = None
-        if 'create_fn' in status and 'resourceID' in status['create_fn']:
-            route_id = status['create_fn']['resourceID']
-        elif 'update_fn' in status and 'resourceID' in status['update_fn']:
-            route_id = status['update_fn']['resourceID']
+        api_key = os.environ.get('NETBIRD_API_KEY')
+        if not api_key:
+            raise kopf.PermanentError("NETBIRD_API_KEY environment variable is required")
 
+        client = NetbirdClient(api_key)
+        
+        route_id = status.get('resourceId')
         if not route_id:
             logger.warning("No route ID found in status, skipping deletion")
             return
@@ -399,6 +456,16 @@ def delete_fn(spec: Dict[str, Any], status: Dict[str, Any], logger: logging.Logg
         logger.info(f"Deleting route {route_id}")
         client.delete_route(route_id)
         logger.info(f"Route {route_id} deleted successfully")
+        
+        patch.update({
+            'status': create_status_body(
+                status='True',
+                reason='RouteDeleting',
+                message=f"Route {route_id} deletion in progress",
+                resource_id=route_id
+            )
+        })
+        
     except Exception as e:
         error_msg = f"Failed to delete route: {str(e)}"
         logger.error(error_msg)
@@ -406,55 +473,66 @@ def delete_fn(spec: Dict[str, Any], status: Dict[str, Any], logger: logging.Logg
 
 # Group Handlers
 @kopf.on.create('gitops.netbird.io', 'v1alpha1', 'groups')
-def create_group_fn(spec: Dict[str, Any], meta: Dict[str, Any], logger: logging.Logger, **_) -> Dict[str, Any]:
+def create_group_fn(spec: Dict[str, Any], meta: Dict[str, Any], status: Dict[str, Any],
+                   patch: Dict[str, Any], logger: logging.Logger, **kwargs):
     """Handle creation of new Netbird groups"""
     logger.info(f"Starting group creation for {meta['name']}")
     
-    api_key = os.environ.get('NETBIRD_API_KEY')
-    if not api_key:
-        raise kopf.PermanentError("NETBIRD_API_KEY environment variable is required")
-
-    client = NetbirdClient(api_key)
-    
     try:
+        api_key = os.environ.get('NETBIRD_API_KEY')
+        if not api_key:
+            raise kopf.PermanentError("NETBIRD_API_KEY environment variable is required")
+
+        client = NetbirdClient(api_key)
         group_spec = GroupSpec.from_dict(spec)
-        logger.info(f"Creating group {group_spec.name}")
-        logger.debug(f"Prepared group specification: {group_spec.to_dict()}")
-        
         group = client.create_group(group_spec)
         
-        return create_status_condition(
-            status='True',
-            reason='GroupCreated',
-            message=f"Group {group['id']} created successfully",
-            resource_id=group['id']
-        )
+        patch.update({
+            'status': create_status_body(
+                status='True',
+                reason='GroupCreated',
+                message=f"Group {group['id']} created successfully",
+                resource_id=group['id'],
+                meta=meta
+            )
+        })
+        
     except ValueError as e:
-        logger.error(f"Invalid group specification: {str(e)}")
-        raise kopf.PermanentError(f"Invalid group specification: {str(e)}")
+        patch.update({
+            'status': create_status_body(
+                status='False',
+                reason='ValidationError',
+                message=str(e),
+                meta=meta
+            )
+        })
+        raise kopf.PermanentError(str(e))
+        
     except Exception as e:
-        logger.error(f"Failed to create group: {str(e)}")
-        raise kopf.TemporaryError(f"Failed to create group: {str(e)}", delay=60)
+        patch.update({
+            'status': create_status_body(
+                status='False',
+                reason='Error',
+                message=str(e),
+                meta=meta
+            )
+        })
+        raise kopf.TemporaryError(str(e), delay=60)
 
 @kopf.on.delete('gitops.netbird.io', 'v1alpha1', 'groups')
-def delete_group_fn(spec: Dict[str, Any], status: Dict[str, Any], meta: Dict[str, Any], 
-                   logger: logging.Logger, **_):
+def delete_group_fn(spec: Dict[str, Any], status: Dict[str, Any], meta: Dict[str, Any],
+                   patch: Dict[str, Any], logger: logging.Logger, **kwargs):
     """Handle deletion of Netbird groups"""
     logger.info(f"Starting group deletion for {meta['name']}")
     
-    api_key = os.environ.get('NETBIRD_API_KEY')
-    if not api_key:
-        raise kopf.PermanentError("NETBIRD_API_KEY environment variable is required")
-
-    client = NetbirdClient(api_key)
-    
     try:
-        group_id = None
-        for handler in ['create_group_fn', 'update_group_fn']:
-            if handler in status and 'resourceID' in status[handler]:
-                group_id = status[handler]['resourceID']
-                break
+        api_key = os.environ.get('NETBIRD_API_KEY')
+        if not api_key:
+            raise kopf.PermanentError("NETBIRD_API_KEY environment variable is required")
 
+        client = NetbirdClient(api_key)
+        
+        group_id = status.get('resourceId')
         if not group_id:
             logger.warning(f"No group ID found in status for {meta['name']}, skipping deletion")
             return
@@ -463,12 +541,35 @@ def delete_group_fn(spec: Dict[str, Any], status: Dict[str, Any], meta: Dict[str
         try:
             client.delete_group(group_id)
             logger.info(f"Group {group_id} deleted successfully")
+            
+            patch.update({
+                'status': create_status_body(
+                    status='True',
+                    reason='GroupDeleting',
+                    message=f"Group {group_id} deletion in progress",
+                    resource_id=group_id,
+                    meta=meta
+                )
+            })
+            
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 404:
                 logger.info(f"Group {group_id} already deleted")
             else:
                 raise
+                
     except Exception as e:
         error_msg = f"Failed to delete group: {str(e)}"
         logger.error(error_msg)
+        
+        patch.update({
+            'status': create_status_body(
+                status='False',
+                reason='DeletionError',
+                message=error_msg,
+                resource_id=group_id,
+                meta=meta
+            )
+        })
+        
         raise kopf.PermanentError(error_msg)
